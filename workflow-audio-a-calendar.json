@@ -1,0 +1,187 @@
+{
+  "name": "WhatsApp audio a Google Calendar",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 300],
+      "webhookId": "whatsapp-audio-calendar"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.body.From }}",
+              "operation": "equal",
+              "value2": "whatsapp:+506XXXXXXXX"
+            },
+            {
+              "value1": "={{ $json.body.NumMedia }}",
+              "operation": "notEqual",
+              "value2": "0"
+            }
+          ]
+        },
+        "combineOperation": "all"
+      },
+      "name": "Solo mi numero con audio",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.body.MediaUrl0 }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "name": "Descargar audio",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "const buf = await this.helpers.getBinaryDataBuffer(0, 'data');\nconst audio = buf.toString('base64');\n\nconst ahora = new Date();\nconst hoyTexto = ahora.toLocaleString('es-CR', { timeZone: 'America/Costa_Rica', dateStyle: 'full', timeStyle: 'short' });\nconst hoyISO = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Costa_Rica' }).format(ahora);\n\nconst prompt = `Eres un asistente que agenda eventos. Escucha el audio (en español) y devuelve SOLO un JSON con estas claves: titulo (string corto), fecha (YYYY-MM-DD o null), hora (HH:MM en 24 horas o null), duracion_min (numero entero, 60 si no se menciona), notas (string o null). Hoy es ${hoyTexto} (${hoyISO}), zona horaria America/Costa_Rica. Interpreta fechas relativas como 'mañana', 'el viernes' o 'en dos semanas' a partir de hoy.`;\n\nreturn [{\n  json: {\n    hoyISO,\n    body: {\n      contents: [{\n        parts: [\n          { text: prompt },\n          { inline_data: { mime_type: 'audio/ogg', data: audio } }\n        ]\n      }],\n      generationConfig: { responseMimeType: 'application/json' }\n    }\n  }\n}];"
+      },
+      "name": "Preparar peticion",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "key",
+              "value": "PON_AQUI_TU_API_KEY_DE_GEMINI"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {}
+      },
+      "name": "Gemini entiende el audio",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "const texto = $input.first().json.candidates[0].content.parts[0].text;\nconst d = JSON.parse(texto);\nconst hoy = $('Preparar peticion').first().json.hoyISO;\n\nconst fecha = d.fecha || hoy;\nconst dur = Number(d.duracion_min) || 60;\nconst notas = d.notas || '';\n\nlet start, end, allday;\nif (d.hora) {\n  allday = 'no';\n  start = `${fecha}T${d.hora}:00-06:00`;\n  // Costa Rica no tiene horario de verano: siempre UTC-6\n  const ms = new Date(start).getTime() + dur * 60000;\n  end = new Date(ms - 6 * 3600000).toISOString().replace(/\\.\\d{3}Z$/, '-06:00');\n} else {\n  allday = 'yes';\n  start = `${fecha}T00:00:00-06:00`;\n  end = `${fecha}T23:59:00-06:00`;\n}\n\nreturn [{ json: { titulo: d.titulo, notas, fecha, hora: d.hora, start, end, allday } }];"
+      },
+      "name": "Armar evento",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 200]
+    },
+    {
+      "parameters": {
+        "calendar": {
+          "__rl": true,
+          "value": "primary",
+          "mode": "id"
+        },
+        "start": "={{ $json.start }}",
+        "end": "={{ $json.end }}",
+        "additionalFields": {
+          "summary": "={{ $json.titulo }}",
+          "description": "={{ $json.notas }}",
+          "allday": "={{ $json.allday }}"
+        }
+      },
+      "name": "Crear evento en Calendar",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [1320, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "=<Response><Message>✅ Agendado: {{ $('Armar evento').first().json.titulo }} ({{ $('Armar evento').first().json.fecha }} {{ $('Armar evento').first().json.hora || 'todo el día' }})</Message></Response>",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/xml"
+              }
+            ]
+          }
+        }
+      },
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1540, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "<Response></Response>",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/xml"
+              }
+            ]
+          }
+        }
+      },
+      "name": "Respond to Webhook1",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [440, 400]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Solo mi numero con audio", "type": "main", "index": 0 }]]
+    },
+    "Solo mi numero con audio": {
+      "main": [
+        [{ "node": "Descargar audio", "type": "main", "index": 0 }],
+        [{ "node": "Respond to Webhook1", "type": "main", "index": 0 }]
+      ]
+    },
+    "Descargar audio": {
+      "main": [[{ "node": "Preparar peticion", "type": "main", "index": 0 }]]
+    },
+    "Preparar peticion": {
+      "main": [[{ "node": "Gemini entiende el audio", "type": "main", "index": 0 }]]
+    },
+    "Gemini entiende el audio": {
+      "main": [[{ "node": "Armar evento", "type": "main", "index": 0 }]]
+    },
+    "Armar evento": {
+      "main": [[{ "node": "Crear evento en Calendar", "type": "main", "index": 0 }]]
+    },
+    "Crear evento en Calendar": {
+      "main": [[{ "node": "Respond to Webhook", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" }
+}
